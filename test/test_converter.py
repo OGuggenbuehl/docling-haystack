@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 
 from docling.chunking import HybridChunker
 from docling.datamodel.document import DoclingDocument
+from haystack.dataclasses.byte_stream import ByteStream
 
 from docling_haystack.converter import DoclingConverter, ExportType
 
@@ -80,3 +81,71 @@ def test_convert_markdown(monkeypatch):
     with open(EXPECTED_OUT_FILE) as f:
         exp_data = json.load(fp=f)
     assert exp_data == act_data
+
+
+def test_serialization_deserialization():
+    """Test component serialization and deserialization."""
+    converter = DoclingConverter(
+        convert_kwargs={"optimize_ocr": True},
+        md_export_kwargs={"image_placeholder": "[IMAGE]"},
+    )
+
+    # serialize the component to dict
+    serialized = converter.to_dict()
+
+    assert "init_parameters" in serialized
+    assert serialized["init_parameters"].get("convert_kwargs") == {"optimize_ocr": True}
+
+    md_export_kwargs = serialized["init_parameters"].get("md_export_kwargs", {})
+    assert md_export_kwargs.get("image_placeholder") == "[IMAGE]"
+
+    # deserialize back to component
+    deserialized = DoclingConverter.from_dict(serialized)
+    assert deserialized._convert_kwargs == {"optimize_ocr": True}
+
+    assert deserialized._md_export_kwargs.get("image_placeholder") == "[IMAGE]"
+
+
+def test_bytestream_handling(monkeypatch):
+    """Test conversion from ByteStream."""
+    with open("test/data/2408.09869v5.md", "rb") as f:
+        data = f.read()
+
+    bytestream = ByteStream(
+        data=data,
+        meta={"file_extension": "md", "filename": "test_file.md"},
+    )
+
+    with open("test/data/2408.09869v5.json") as f:
+        data_json = f.read()
+    mock_dl_doc = DoclingDocument.model_validate_json(data_json)
+    mock_response = MagicMock()
+    mock_response.document = mock_dl_doc
+
+    monkeypatch.setattr(
+        "docling.document_converter.DocumentConverter.__init__",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "docling.document_converter.DocumentConverter.convert",
+        lambda *args, **kwargs: mock_response,
+    )
+
+    def mock_extract_meta(self, dl_doc):
+        return {"custom_field": "test_value"}
+
+    monkeypatch.setattr(
+        "docling_haystack.converter.MetaExtractor.extract_dl_doc_meta",
+        mock_extract_meta,
+    )
+
+    converter = DoclingConverter(
+        export_type=ExportType.MARKDOWN,
+    )
+
+    result = converter.run(paths=[bytestream])
+    documents = result["documents"]
+
+    assert len(documents) > 0
+    assert documents[0].meta.get("custom_field") == "test_value"
+    assert len(documents[0].content) > 0
