@@ -115,12 +115,15 @@ def test_bytestream_handling(monkeypatch):
         data=data,
         meta={"file_extension": "md", "filename": "test_file.md"},
     )
+    convert_mock = MagicMock()
 
     with open("test/data/2408.09869v5.json") as f:
         data_json = f.read()
     mock_dl_doc = DoclingDocument.model_validate_json(data_json)
+
     mock_response = MagicMock()
     mock_response.document = mock_dl_doc
+    convert_mock.return_value = mock_response
 
     monkeypatch.setattr(
         "docling.document_converter.DocumentConverter.__init__",
@@ -128,7 +131,7 @@ def test_bytestream_handling(monkeypatch):
     )
     monkeypatch.setattr(
         "docling.document_converter.DocumentConverter.convert",
-        lambda *args, **kwargs: mock_response,
+        convert_mock,  # use our mock that captures the filepath
     )
 
     def mock_extract_meta(self, dl_doc):
@@ -143,8 +146,14 @@ def test_bytestream_handling(monkeypatch):
         export_type=ExportType.MARKDOWN,
     )
 
+    # ByteStream directly in the paths parameter
     result = converter.run(paths=[bytestream])
     documents = result["documents"]
+
+    assert convert_mock.called
+    filepath_arg = convert_mock.call_args[1]["source"]
+    assert isinstance(filepath_arg, str)
+    assert filepath_arg.endswith(".md")
 
     assert len(documents) > 0
     assert documents[0].meta.get("custom_field") == "test_value"
