@@ -5,6 +5,7 @@
 
 """Docling Haystack converter module."""
 
+import tempfile
 from abc import ABC, abstractmethod
 from enum import Enum
 from pathlib import Path
@@ -13,7 +14,10 @@ from typing import Any, Iterable, Optional, Union
 from docling.chunking import BaseChunk, BaseChunker, HybridChunker
 from docling.datamodel.document import DoclingDocument
 from docling.document_converter import DocumentConverter
-from haystack import Document, component
+from haystack import Document, component, default_from_dict, default_to_dict, logging
+from haystack.dataclasses.byte_stream import ByteStream
+
+logger = logging.getLogger(__name__)
 
 
 class ExportType(str, Enum):
@@ -100,42 +104,109 @@ class DoclingConverter:
             )
         self._meta_extractor = meta_extractor or MetaExtractor()
 
+    def _handle_bytestream(self, bytestream: ByteStream) -> tuple[str, bool]:
+        """Save ByteStream to a temporary file if needed."""
+        suffix = (
+            f".{bytestream.meta.get('file_extension', '')}"
+            if bytestream.meta.get("file_extension")
+            else None
+        )
+        temp_file = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        temp_file.write(bytestream.data)
+        temp_file.close()
+        return temp_file.name, True
+
     @component.output_types(documents=list[Document])
     def run(
         self,
-        paths: Iterable[Union[Path, str]],
+        paths: Iterable[Union[Path, str, ByteStream]],
     ):
         """Run the DoclingConverter.
 
         Args:
-            paths: The input document locations, either as local paths or URLs.
+            paths: The input document locations, either as local paths, URLs, or ByteStream objects.
 
         Returns:
             list[Document]: The output Haystack Documents.
         """
         documents: list[Document] = []
-        for filepath in paths:
-            dl_doc = self._converter.convert(
-                source=filepath,
-                **self._convert_kwargs,
-            ).document
+        temp_files = []  # Track temporary files to clean up later
 
-            if self._export_type == ExportType.DOC_CHUNKS:
-                chunk_iter = self._chunker.chunk(dl_doc=dl_doc)
-                hs_docs = [
-                    Document(
-                        content=self._chunker.serialize(chunk=chunk),
-                        meta=self._meta_extractor.extract_chunk_meta(chunk=chunk),
+        try:
+            for source in paths:
+                try:
+                    if isinstance(source, ByteStream):
+                        filepath, is_temp = self._handle_bytestream(source)
+                        if is_temp:
+                            temp_files.append(filepath)
+                    else:
+                        filepath = str(source)
+
+                    dl_doc = self._converter.convert(
+                        source=filepath,
+                        **self._convert_kwargs,
+                    ).document
+
+                    if self._export_type == ExportType.DOC_CHUNKS:
+                        chunk_iter = self._chunker.chunk(dl_doc=dl_doc)
+                        hs_docs = [
+                            Document(
+                                content=self._chunker.serialize(chunk=chunk),
+                                meta=self._meta_extractor.extract_chunk_meta(
+                                    chunk=chunk
+                                ),
+                            )
+                            for chunk in chunk_iter
+                        ]
+                        documents.extend(hs_docs)
+                    elif self._export_type == ExportType.MARKDOWN:
+                        hs_doc = Document(
+                            content=dl_doc.export_to_markdown(**self._md_export_kwargs),
+                            meta=self._meta_extractor.extract_dl_doc_meta(
+                                dl_doc=dl_doc
+                            ),
+                        )
+                        documents.append(hs_doc)
+                    else:
+                        raise RuntimeError(
+                            f"Unexpected export type: {self._export_type}"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "Could not process {source}. Skipping it. Error: {error}",
+                        source=source,
+                        error=e,
                     )
-                    for chunk in chunk_iter
-                ]
-                documents.extend(hs_docs)
-            elif self._export_type == ExportType.MARKDOWN:
-                hs_doc = Document(
-                    content=dl_doc.export_to_markdown(**self._md_export_kwargs),
-                    meta=self._meta_extractor.extract_dl_doc_meta(dl_doc=dl_doc),
-                )
-                documents.append(hs_doc)
-            else:
-                raise RuntimeError(f"Unexpected export type: {self._export_type}")
-        return {"documents": documents}
+            return {"documents": documents}
+        finally:  # cleanup
+            for temp_file in temp_files:
+                try:
+                    Path(temp_file).unlink()
+                except Exception as e:
+                    logger.debug(f"Failed to delete temporary file {temp_file}: {e}")
+
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Serialize the component to a dictionary for pipeline persistence.
+
+        Returns:
+            dict[str, Any]: A dictionary representation of the component
+        """
+        return default_to_dict(
+            self,
+            convert_kwargs=self._convert_kwargs,
+            md_export_kwargs=self._md_export_kwargs,
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "DoclingConverter":
+        """
+        Deserialize the component from a dictionary.
+
+        Args:
+            data: Dictionary representation of the component
+
+        Returns:
+            DoclingConverter: A new instance of the component
+        """
+        return default_from_dict(cls, data)
