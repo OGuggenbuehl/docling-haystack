@@ -80,3 +80,26 @@ def test_convert_markdown(monkeypatch):
     with open(EXPECTED_OUT_FILE) as f:
         exp_data = json.load(fp=f)
     assert exp_data == act_data
+
+
+def test_serialization_deserialization():
+    """Test component serialization and deserialization."""
+    converter = DoclingConverter(
+        convert_kwargs={"optimize_ocr": True},
+        md_export_kwargs={"image_placeholder": "[IMAGE]"},
+    )
+
+    # serialize the component to dict
+    serialized = converter.to_dict()
+
+    assert "init_parameters" in serialized
+    assert serialized["init_parameters"].get("convert_kwargs") == {"optimize_ocr": True}
+
+    md_export_kwargs = serialized["init_parameters"].get("md_export_kwargs", {})
+    assert md_export_kwargs.get("image_placeholder") == "[IMAGE]"
+
+    # deserialize back to component
+    deserialized = DoclingConverter.from_dict(serialized)
+    assert deserialized._convert_kwargs == {"optimize_ocr": True}
+
+    assert deserialized._md_export_kwargs.get("image_placeholder") == "[IMAGE]"

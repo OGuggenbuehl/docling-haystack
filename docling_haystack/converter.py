@@ -13,7 +13,7 @@ from typing import Any, Iterable, Optional, Union
 from docling.chunking import BaseChunk, BaseChunker, HybridChunker
 from docling.datamodel.document import DoclingDocument
 from docling.document_converter import DocumentConverter
-from haystack import Document, component
+from haystack import Document, component, default_from_dict, default_to_dict
 
 
 class ExportType(str, Enum):
@@ -139,3 +139,29 @@ class DoclingConverter:
             else:
                 raise RuntimeError(f"Unexpected export type: {self._export_type}")
         return {"documents": documents}
+    
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Serialize the component to a dictionary for pipeline persistence.
+
+        Returns:
+            dict[str, Any]: A dictionary representation of the component
+        """
+        return default_to_dict(
+            self,
+            convert_kwargs=self._convert_kwargs,
+            md_export_kwargs=self._md_export_kwargs,
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "DoclingConverter":
+        """
+        Deserialize the component from a dictionary.
+
+        Args:
+            data: Dictionary representation of the component
+
+        Returns:
+            DoclingConverter: A new instance of the component
+        """
+        return default_from_dict(cls, data)
